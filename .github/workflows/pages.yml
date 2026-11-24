@@ -14,6 +14,8 @@ permissions:
 env:
   MZLAB_LAB: "1"
   MZLAB_LAB_EXPIRES: "2026-12-29"
+  # production builds: tools/wasm_opt.sh fails closed here, so no .wasm is tested or published without wasm-opt and its size gate
+  MZLAB_WASM_OPT_STRICT: "1"
 
 # No run is ever cancelled: a running build/deploy finishes (the site always gets a new version), and of the runs waiting
 # GitHub keeps only the newest, so quick merges in a row end in one more deploy of the last commit, never in none.
@@ -29,21 +31,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Freeesta/mzlab
           ref: main
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      # the binaryen tarball of tools/wasm_opt.sh, one cache per version: a GitHub release outage does not stop the build, and the script still checks its SHA-256
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/binaryen-133.tar.gz
+          key: binaryen-version_133-${{ runner.os }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: Toolchain (version pinned in rust-toolchain.toml)
         run: rustup show
-      # the identity of the build for option_env! (prov/1, corsa/1): rustc, SHA-256 of Cargo.lock, target; never the commit, so the .wasm bytes do not change at every commit
+      # the identity of the build for option_env! (prov/1, run-report/2): rustc, SHA-256 of Cargo.lock, target; never the commit, so the .wasm bytes do not change at every commit
       - name: Build identity of the WASM modules
         run: python3 -c 'import sys; sys.path.insert(0, "tools"); import prepara_sito; [print(f"{k}={v}") for k, v in prepara_sito.build_env("wasm32-unknown-unknown", commit=False).items()]' >> "$GITHUB_ENV"
       # every run restores the newest cache of its kind; a new one is saved only when the Rust sources (crates/, vendor/, Cargo.lock) changed: the 10 GB of caches of the repository are not filled by copies of the same build
       - id: rcache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -66,19 +73,19 @@ jobs:
       - name: Build the WASM engine, the libraries and the readers (only in the published site, never committed)
         run: |
           mkdir -p site/static
-          cargo build --locked --release --target wasm32-unknown-unknown -p mzlab-wasm
+          tools/cargo_wasm.sh build --locked --release --target wasm32-unknown-unknown -p mzlab-wasm
           wasm-bindgen --target web --no-typescript --out-dir site/static/wasm target/wasm32-unknown-unknown/release/mzlab_wasm.wasm
-          tools/wasm_opt.sh site/static/wasm/mzlab_wasm_bg.wasm 2744320 engine @motore
-          cargo build --locked --release --target wasm32-unknown-unknown -p mzlab-lib-wasm
+          tools/wasm_opt.sh site/static/wasm/mzlab_wasm_bg.wasm "$(python3 tools/moduli.py --cap motore)" engine @motore
+          tools/cargo_wasm.sh build --locked --release --target wasm32-unknown-unknown -p mzlab-lib-wasm
           wasm-bindgen --target web --no-typescript --out-dir site/static/wasm-lib target/wasm32-unknown-unknown/release/mzlab_lib_wasm.wasm
-          tools/wasm_opt.sh site/static/wasm-lib/mzlab_lib_wasm_bg.wasm 614400 libraries @motore
+          tools/wasm_opt.sh site/static/wasm-lib/mzlab_lib_wasm_bg.wasm "$(python3 tools/moduli.py --cap librerie)" libraries @motore
           # the readers (8 families, own manifest) build here, not in part b of build_feat_wasm.sh: it evens out the three jobs
           tools/build_lettori_wasm.sh site/static
       - name: Record the tree of the cache
         if: steps.rcache.outputs.cache-hit != 'true'
         run: python3 tools/ci_cargo_mtime.py record
       - name: Save the Rust cache
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.rcache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -87,7 +94,7 @@ jobs:
             ~/.cargo/bin/wasm-bindgen
             target
           key: ${{ steps.rcache.outputs.cache-primary-key }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pages-core
           path: |
@@ -100,21 +107,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Freeesta/mzlab
           ref: main
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      # the binaryen tarball of tools/wasm_opt.sh, one cache per version: a GitHub release outage does not stop the build, and the script still checks its SHA-256
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/binaryen-133.tar.gz
+          key: binaryen-version_133-${{ runner.os }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: Toolchain (version pinned in rust-toolchain.toml)
         run: rustup show
-      # the identity of the build for option_env! (prov/1, corsa/1): rustc, SHA-256 of Cargo.lock, target; never the commit, so the .wasm bytes do not change at every commit
+      # the identity of the build for option_env! (prov/1, run-report/2): rustc, SHA-256 of Cargo.lock, target; never the commit, so the .wasm bytes do not change at every commit
       - name: Build identity of the WASM modules
         run: python3 -c 'import sys; sys.path.insert(0, "tools"); import prepara_sito; [print(f"{k}={v}") for k, v in prepara_sito.build_env("wasm32-unknown-unknown", commit=False).items()]' >> "$GITHUB_ENV"
       # every run restores the newest cache of its kind; a new one is saved only when the Rust sources (crates/, vendor/, Cargo.lock) changed: the 10 GB of caches of the repository are not filled by copies of the same build
       - id: rcache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -142,7 +154,7 @@ jobs:
         if: steps.rcache.outputs.cache-hit != 'true'
         run: python3 tools/ci_cargo_mtime.py record
       - name: Save the Rust cache
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.rcache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -151,7 +163,7 @@ jobs:
             ~/.cargo/bin/wasm-bindgen
             target
           key: ${{ steps.rcache.outputs.cache-primary-key }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pages-feat-a
           # a single path would drop its own name from the artifact: site/static holds only wasm-feat here, so the prefix stays
@@ -162,21 +174,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Freeesta/mzlab
           ref: main
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      # the binaryen tarball of tools/wasm_opt.sh, one cache per version: a GitHub release outage does not stop the build, and the script still checks its SHA-256
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/binaryen-133.tar.gz
+          key: binaryen-version_133-${{ runner.os }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       - name: Toolchain (version pinned in rust-toolchain.toml)
         run: rustup show
-      # the identity of the build for option_env! (prov/1, corsa/1): rustc, SHA-256 of Cargo.lock, target; never the commit, so the .wasm bytes do not change at every commit
+      # the identity of the build for option_env! (prov/1, run-report/2): rustc, SHA-256 of Cargo.lock, target; never the commit, so the .wasm bytes do not change at every commit
       - name: Build identity of the WASM modules
         run: python3 -c 'import sys; sys.path.insert(0, "tools"); import prepara_sito; [print(f"{k}={v}") for k, v in prepara_sito.build_env("wasm32-unknown-unknown", commit=False).items()]' >> "$GITHUB_ENV"
       # every run restores the newest cache of its kind; a new one is saved only when the Rust sources (crates/, vendor/, Cargo.lock) changed: the 10 GB of caches of the repository are not filled by copies of the same build
       - id: rcache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -204,7 +221,7 @@ jobs:
         if: steps.rcache.outputs.cache-hit != 'true'
         run: python3 tools/ci_cargo_mtime.py record
       - name: Save the Rust cache
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.rcache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -213,7 +230,7 @@ jobs:
             ~/.cargo/bin/wasm-bindgen
             target
           key: ${{ steps.rcache.outputs.cache-primary-key }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pages-feat-b
           # a single path would drop its own name from the artifact: site/static holds only wasm-feat here, so the prefix stays
@@ -224,11 +241,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Freeesta/mzlab
           ref: main
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       # the builder of the packages is a native example of mzlab-lib: cargo builds it when the cache of the packages is cold
@@ -237,7 +254,7 @@ jobs:
       - run: mkdir -p site/static
       - name: Restore the spectral-library packages from the cache (pinned MassBank release, built with the Rust builder, never committed)
         id: libcache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: site/static/librerie
           key: librerie-${{ hashFiles('tools/librerie_pacchetti.py', 'tools/librerie_catalogo.json', 'crates/mzlab-lib/src/**', 'tests/golden/librerie/massbank_unito/**') }}
@@ -256,7 +273,7 @@ jobs:
       - name: Restore the MassBank download
         if: steps.libcache.outputs.cache-hit != 'true'
         id: mbcache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .massbank-cache
           key: massbank-zip-${{ steps.pin.outputs.massbank }}
@@ -286,63 +303,160 @@ jobs:
           fi
       - name: Save the MassBank download
         if: steps.libcache.outputs.cache-hit != 'true' && steps.mbcache.outputs.cache-hit != 'true' && hashFiles('.massbank-cache/massbank.zip') != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .massbank-cache
           key: massbank-zip-${{ steps.pin.outputs.massbank }}
       - name: Save the packages in the cache
         if: steps.libcache.outputs.cache-hit != 'true' && hashFiles('site/static/librerie/catalogo.json') != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: site/static/librerie
           key: librerie-${{ hashFiles('tools/librerie_pacchetti.py', 'tools/librerie_catalogo.json', 'crates/mzlab-lib/src/**', 'tests/golden/librerie/massbank_unito/**') }}
       - name: Restore the suspect index from the cache (pinned CC BY sources, never committed)
         id: suscache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: site/static/mzfinder/sospetti
           key: sospetti-${{ hashFiles('tools/genera_sospetti.py') }}
       - name: Restore the suspect sources
         if: steps.suscache.outputs.cache-hit != 'true'
         id: fonticache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .sospetti-fonti
           key: sospetti-fonti-${{ steps.pin.outputs.fonti }}
-      # genera_sospetti.py checks every file of --fonte against its pinned SHA-256 and downloads only the missing ones
+      # genera_sospetti.py checks every file of --source against its pinned SHA-256 and downloads only the missing ones
       - name: Build the suspect index of mzFinder (pinned CC BY sources, never committed; a network failure only warns)
         if: steps.suscache.outputs.cache-hit != 'true'
-        run: python tools/genera_sospetti.py --fonte .sospetti-fonti --pacchetto site/static/mzfinder/sospetti
+        run: python tools/genera_sospetti.py --source .sospetti-fonti --package site/static/mzfinder/sospetti
       - name: Save the suspect sources
         if: steps.suscache.outputs.cache-hit != 'true' && steps.fonticache.outputs.cache-hit != 'true' && hashFiles('site/static/mzfinder/sospetti/catalogo.json') != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .sospetti-fonti
           key: sospetti-fonti-${{ steps.pin.outputs.fonti }}
       - name: Save the suspect index in the cache
         if: steps.suscache.outputs.cache-hit != 'true' && hashFiles('site/static/mzfinder/sospetti/catalogo.json') != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: site/static/mzfinder/sospetti
           key: sospetti-${{ hashFiles('tools/genera_sospetti.py') }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      # the regulatory lists are committed text (normative/): packed natively, no network; the package is data downloaded on a click, never code in a .wasm
+      - name: Restore the regulatory-list package from the cache
+        id: normcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: site/static/normative
+          key: normative-${{ hashFiles('normative/lists/**', 'normative/provenance.json', 'crates/mzlab-cli/src/normative/**', 'crates/mzlab-feat/src/suspects.rs', 'Cargo.lock') }}
+      - name: Pack the regulatory lists (mzlab-cli db normative pack, no network)
+        if: steps.normcache.outputs.cache-hit != 'true'
+        run: |
+          cargo build --locked --release -p mzlab-cli
+          target/release/mzlab-cli db normative pack normative/ site/static/normative/
+      - name: Save the regulatory-list package in the cache
+        if: steps.normcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: site/static/normative
+          key: normative-${{ hashFiles('normative/lists/**', 'normative/provenance.json', 'crates/mzlab-cli/src/normative/**', 'crates/mzlab-feat/src/suspects.rs', 'Cargo.lock') }}
+      # the in-silico candidates are the PubChemLite structures in mass-range pieces, packed natively; downloaded by the user on a click, never code in a .wasm
+      - name: Restore the in-silico candidate package from the cache
+        id: inscache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: site/static/insilico
+          key: insilico-${{ steps.pin.outputs.fonti }}-${{ hashFiles('crates/mzlab-cli/src/insilico_pack.rs', 'crates/mzlab-feat/src/flow_insilico.rs', 'crates/mzlab-feat/src/attributio/ms2_engine/insilico.rs', 'tools/pubchemlite_pacchetto.py', 'Cargo.lock') }}
+      - name: Restore the PubChemLite CSV
+        if: steps.inscache.outputs.cache-hit != 'true'
+        id: inscsv
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .insilico-fonti
+          key: insilico-fonti-${{ steps.pin.outputs.fonti }}
+      - name: Pack the in-silico candidates (mzlab-cli db insilico pack; a network failure only warns)
+        if: steps.inscache.outputs.cache-hit != 'true'
+        run: |
+          cargo build --locked --release -p mzlab-cli
+          python tools/pubchemlite_pacchetto.py --source .insilico-fonti --cli target/release/mzlab-cli --out site/static/insilico
+      - name: Save the PubChemLite CSV
+        if: steps.inscache.outputs.cache-hit != 'true' && steps.inscsv.outputs.cache-hit != 'true' && hashFiles('site/static/insilico/catalogo.json') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .insilico-fonti
+          key: insilico-fonti-${{ steps.pin.outputs.fonti }}
+      - name: Save the in-silico candidate package in the cache
+        if: steps.inscache.outputs.cache-hit != 'true' && hashFiles('site/static/insilico/catalogo.json') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: site/static/insilico
+          key: insilico-${{ steps.pin.outputs.fonti }}-${{ hashFiles('crates/mzlab-cli/src/insilico_pack.rs', 'crates/mzlab-feat/src/flow_insilico.rs', 'crates/mzlab-feat/src/attributio/ms2_engine/insilico.rs', 'tools/pubchemlite_pacchetto.py', 'Cargo.lock') }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pages-packages
-          # site/static holds only librerie and mzfinder/sospetti here, so the prefix stays
+          # site/static holds only librerie, normative, insilico and mzfinder/sospetti here, so the prefix stays
           path: site/static
           if-no-files-found: ignore
           retention-days: 1
+
+  # the native release builds of sito-rust.yml's `sito-e2e` (its two slow e2e), with its very commands: only to keep their cache fresh, the site does not use them.
+  # A cache saved once a night is evicted by the next morning (the repository saves far more than its 10 GB a day); one saved here on every Rust change is not.
+  native-e2e:
+    if: github.repository == 'Freeesta/mzlab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Freeesta/mzlab
+          ref: main
+      - name: Toolchain (version pinned in rust-toolchain.toml)
+        run: python3 tools/ci_toolchain.py
+      - id: rcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pages-e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/**', 'vendor/**', '.cargo/**') }}-m1
+          restore-keys: |
+            pages-e2e-${{ runner.os }}-
+            sito-v2-e2e-${{ runner.os }}-
+      - id: mtime
+        name: Reuse the compiled crates of the cache
+        if: steps.rcache.outputs.cache-hit != 'true'
+        run: python3 tools/ci_cargo_mtime.py restore
+      - name: Native release builds of the slow e2e (as sito-e2e)
+        if: steps.rcache.outputs.cache-hit != 'true'
+        run: |
+          cargo build -q --release -p mzlab-core --example mzidx
+          cargo build -q --release --locked -p mzlab-cli
+      - name: Record the tree of the cache
+        if: steps.rcache.outputs.cache-hit != 'true'
+        run: |
+          find target -maxdepth 4 -type d -name incremental -prune -exec rm -rf {} + || true
+          python3 tools/ci_cargo_mtime.py record
+      - name: Save the Rust cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.rcache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rcache.outputs.cache-primary-key }}
 
   assemble:
     needs: [wasm-core, wasm-feat-a, wasm-feat-b, packages]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Freeesta/mzlab
           ref: main
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
       # build.json names the rustc of the pinned toolchain
@@ -350,7 +464,7 @@ jobs:
         run: rustup show
       - name: Build the site
         run: python tools/build_site.py
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: pages-*
           path: parts
@@ -361,14 +475,58 @@ jobs:
           tools/build_feat_wasm.sh site/static manifest
       - name: Record the .wasm modules in static/build.json (they are in place now)
         run: python3 tools/build_site.py --build-json
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+      # the desktop app refuses an update whose file differs from its manifest entry: check the published bytes, build.json included
+      - name: The manifest matches the site, byte for byte
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          out = pathlib.Path("site")
+          m = json.loads((out / "static" / "manifest.json").read_text(encoding="utf-8"))
+          bad = []
+          for rel, e in m["files"].items():
+              d = (out / rel).read_bytes()
+              if (len(d), hashlib.sha256(d).hexdigest()) != (e["size"], e["sha256"]):
+                  bad.append(rel)
+          assert "static/build.json" in m["files"], "build.json missing from the manifest"
+          assert not bad, f"manifest differs from the site: {bad[:5]}"
+          print(f"manifest ok: {len(m['files'])} files")
+          PY
+      # the built modules, for .github/workflows/metriche.yml (sizes per commit, measured off this critical path; small, kept 1 day)
+      - name: .wasm modules for the metrics
+        if: github.ref == 'refs/heads/main' && github.repository == 'Freeesta/mzlab'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: metriche-wasm
+          path: site/static/**/*.wasm
+          if-no-files-found: ignore
+          retention-days: 1
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
 
+  # Deploy gate: the required checks of a pull request (tools/ci_cancello.py: test, rust, sito-rust) must be green on THIS commit of main before the site is published.
+  # It polls while the build runs, so it adds time only when the tests last longer than the build; a red gate leaves the previous site published (a re-run of this job after a re-run of the red check opens it).
+  # Only the main of Freeesta/mzlab has those runs: a branch never deploys, and the lab copy (tools/lab/qqq-pages.yml) deploys without a gate.
+  gate:
+    if: github.ref == 'refs/heads/main' && github.repository == 'Freeesta/mzlab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 160
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Freeesta/mzlab
+          ref: main
+      - name: Wait for the required checks of this commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/ci_cancello.py "$GITHUB_SHA"
+
   deploy:
-    needs: assemble
-    # a branch (workflow_dispatch to try the workflow) builds but never publishes
-    if: github.ref == 'refs/heads/main'
+    needs: [assemble, gate]
+    # a branch (workflow_dispatch to try the workflow) builds but never publishes; on main the gate must be green (skipped only in the lab copy, which has no tests)
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.assemble.result == 'success' && (needs.gate.result == 'success' || (needs.gate.result == 'skipped' && github.repository != 'Freeesta/mzlab')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -383,4 +541,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
